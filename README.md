@@ -56,6 +56,8 @@ This starts as one Go module. Keep services in the same module while they share 
 - Write unit and integration tests as part of each learning project; keep Kubernetes integration work separate from fast local checks.
 - Record what you learned and the next small step in your own notes.
 
+See [docs/go-quality.md](docs/go-quality.md) for the advisory Go lint and static-analysis checks used on pull requests.
+
 ## Start here
 
 1. Install a supported Go toolchain and read [the Go installation guide](https://go.dev/doc/install).
