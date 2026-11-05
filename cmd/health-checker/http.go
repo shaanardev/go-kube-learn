@@ -56,7 +56,7 @@ func (c *Client) CheckEndpoints(ctx context.Context) error {
 
 const maxRespBody = 4 << 10 // 4 KiB
 
-func (c *Client) healthCheckRequest(ctx context.Context, u url.URL) error {
+func (c *Client) healthCheckRequest(ctx context.Context, u url.URL) (err error) {
 	formattedUrl, err := url.JoinPath(u.String(), "health")
 	if err != nil {
 		return err
@@ -71,7 +71,11 @@ func (c *Client) healthCheckRequest(ctx context.Context, u url.URL) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing response body for %s: %w", u.String(), closeErr))
+		}
+	}()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode > http.StatusIMUsed {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBody))
