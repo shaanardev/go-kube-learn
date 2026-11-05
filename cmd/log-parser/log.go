@@ -6,23 +6,61 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 )
 
+type UTCTimestamp struct {
+	time.Time
+}
+
+func NewUTCTimestamp(value time.Time) UTCTimestamp {
+	return UTCTimestamp{value}
+}
+
+func (t *UTCTimestamp) UnmarshalJSON(data []byte) error {
+	var raw string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("timestamp must be a string: %w", err)
+	}
+	// RFC3339 doesnt have the Z component that the contract specifies
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return fmt.Errorf("invalid timestamp: %w", err)
+	}
+
+	if parsed.IsZero() {
+		return errors.New("invalid zeroed timestamp")
+	}
+
+	if parsed.Location() != time.UTC || parsed.Nanosecond() != 0 || !strings.HasSuffix(raw, "Z") {
+		return errors.New("timestamp must be UTC with whole seconds")
+	}
+	t.Time = parsed
+	return nil
+}
+
 type LogRecord struct {
-	Timestamp time.Time `json:"timestamp"`
-	Level     LogLevel  `json:"level"`
-	Message   string    `json:"message"`
+	Timestamp UTCTimestamp `json:"timestamp"`
+	Level     LogLevel     `json:"level"`
+	Message   string       `json:"message"`
 }
 
 func (r LogRecord) Validate() error {
 	if r.Timestamp.IsZero() {
-		return errors.New("timestamp is required")
+		return errors.New("invalid timestamp; zeroed out")
 	}
+
 	if r.Message == "" {
 		return errors.New("message is required")
 	}
-	return nil
+
+	switch r.Level {
+	case LogDebug, LogInfo, LogWarn, LogError:
+		return nil
+	default:
+		return fmt.Errorf("invalid log level %q", r.Level)
+	}
 }
 
 type LogLevel string
@@ -50,22 +88,17 @@ func (l *LogLevel) UnmarshalJSON(data []byte) (err error) {
 }
 
 type Summary struct {
-	malformedRecords map[int]error
-	records          []LogRecord
-	totalDebug       int
-	totalInfo        int
-	totalWarning     int
-	totalError       int
+	totalRecords          int
+	totalMalformedRecords int
+	totalDebug            int
+	totalInfo             int
+	totalWarning          int
+	totalError            int
 }
 
-func NewSummary() *Summary {
-	return &Summary{
-		malformedRecords: make(map[int]error),
-	}
-}
+func (s *Summary) IncrementCounts(record LogRecord) {
+	s.totalRecords++
 
-func (s *Summary) AddRecord(record LogRecord) {
-	s.records = append(s.records, record)
 	switch record.Level {
 	case LogDebug:
 		s.totalDebug++
@@ -80,29 +113,15 @@ func (s *Summary) AddRecord(record LogRecord) {
 	}
 }
 
-func (s *Summary) AddMalformedRecord(lineNumber int, reason error) error {
-	if _, exists := s.malformedRecords[lineNumber]; exists {
-		return fmt.Errorf("malformed record already record for line %d", lineNumber)
-	}
-	s.malformedRecords[lineNumber] = reason
-	return nil
-}
+func (s *Summary) AddMalformedRecord() { s.totalMalformedRecords++ }
 
-func (s Summary) TotalMalformedRecords() int { return len(s.malformedRecords) }
+func (s Summary) TotalMalformedRecords() int { return s.totalMalformedRecords }
 
 func (s Summary) PrintReport(stdout, stderr io.Writer) (err error) {
-	if len(s.malformedRecords) > 0 {
-		for key, value := range s.malformedRecords {
-			if _, err = fmt.Fprintf(stderr, "line %d: malformed record; %s\n", key, value); err != nil {
-				return fmt.Errorf("PrintReport failed: %w", err)
-			}
-		}
-	}
-
 	if _, err = fmt.Fprintf(stdout,
 		"records=%d\nmalformed=%d\nDEBUG=%d\nINFO=%d\nWARN=%d\nERROR=%d\n",
-		len(s.records),
-		len(s.malformedRecords),
+		s.totalRecords,
+		s.totalMalformedRecords,
 		s.totalDebug,
 		s.totalInfo,
 		s.totalWarning,

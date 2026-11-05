@@ -3,46 +3,25 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 )
 
+const maxCapacity = 1 << 20 // 1 MiB (1,048,576 bytes)
+
 func main() {
 	filePath := flag.String("file", "", "Path to the log stream file")
 	flag.Parse()
 
-	input, parseErr := parseInput(*filePath)
-	if parseErr != nil {
-		fmt.Fprintln(os.Stderr, parseErr)
-		os.Exit(1)
-	}
+	summary := &Summary{}
+	err := withInput(*filePath, func(input io.Reader) error {
+		return processInput(input, summary)
+	})
 
-	// if no filePath flag/arg read from stdin
-	scanner := bufio.NewScanner(input)
-	lineNo := 0
-	summary := NewSummary()
-	for scanner.Scan() {
-		lineNo++
-		line := scanner.Bytes()
-		logRecord := LogRecord{}
-		if err := json.Unmarshal(line, &logRecord); err != nil {
-			if addErr := summary.AddMalformedRecord(lineNo, err); addErr != nil {
-				fmt.Fprintln(os.Stderr, "adding malformed record failed:", addErr)
-				os.Exit(1)
-			}
-		} else if err := logRecord.Validate(); err != nil {
-			if addErr := summary.AddMalformedRecord(lineNo, err); addErr != nil {
-				fmt.Fprintln(os.Stderr, "adding malformed record failed:", addErr)
-				os.Exit(1)
-			}
-		} else {
-			summary.AddRecord(logRecord)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "reading input:", err)
 		os.Exit(1)
 	}
@@ -58,23 +37,45 @@ func main() {
 	os.Exit(1)
 }
 
-func parseInput(filePath string) (input io.Reader, err error) {
-	input = os.Stdin
-
-	if filePath != "" {
-		file, openErr := os.Open(filePath)
-		if openErr != nil {
-			return nil, fmt.Errorf("opening file: %w", openErr)
-		}
-
-		defer func() {
-			if closeErr := file.Close(); err == nil {
-				err = fmt.Errorf("closing file: %w", closeErr)
-			}
-		}()
-
-		input = file
+func withInput(filePath string, process func(io.Reader) error) error {
+	if filePath == "" {
+		return process(os.Stdin)
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("opening file failed: %w", err)
 	}
 
-	return input, nil
+	processErr := process(file)
+	closeErr := file.Close()
+	if closeErr != nil {
+		closeErr = fmt.Errorf("closing file failed: %w", closeErr)
+	}
+
+	return errors.Join(processErr, closeErr)
+}
+
+func processInput(input io.Reader, summary *Summary) error {
+	// if no filePath flag/arg read from stdin
+	scanner := bufio.NewScanner(input)
+	buf := make([]byte, maxCapacity)
+	scanner.Split(bufio.ScanLines)
+	scanner.Buffer(buf, maxCapacity)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := scanner.Bytes()
+		logRecord := LogRecord{}
+		if err := json.Unmarshal(line, &logRecord); err != nil {
+			summary.AddMalformedRecord()
+			fmt.Fprintf(os.Stderr, "line %d: malformed record\n", lineNo)
+		} else if err := logRecord.Validate(); err != nil {
+			summary.AddMalformedRecord()
+			fmt.Fprintf(os.Stderr, "line %d: malformed record\n", lineNo)
+		} else {
+			summary.IncrementCounts(logRecord)
+		}
+	}
+
+	return scanner.Err()
 }
